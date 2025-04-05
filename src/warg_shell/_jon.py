@@ -1,5 +1,8 @@
+import json
 import re
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
+from typing import Union
 
 import httpx
 
@@ -9,6 +12,12 @@ class ShellUrlResponse:
     success: bool
     error: str = ""
     url: str = ""
+
+
+@dataclass(frozen=True)
+class PgDumpResponse:
+    success: bool
+    error: str | dict = ""
 
 
 @dataclass
@@ -60,3 +69,27 @@ class Jon:
                 return ShellUrlResponse(success=False, error=data["detail"])
         else:
             resp.raise_for_status()
+
+    async def get_pg_dump(
+        self, token: str, product: str, env: str, db: str
+    ) -> AsyncGenerator[Union[PgDumpResponse, bytes], None]:
+        async with self.client.stream(
+            "POST",
+            "pg_dump/",
+            json=dict(
+                token=token,
+                product=product,
+                env=env,
+                db=db,
+            ),
+        ) as r:
+            if r.status_code in [400, 404]:
+                error_content = await r.aread()
+                error_json = json.loads(error_content)
+                yield PgDumpResponse(success=False, error=error_json["error"])
+                return
+            elif r.status_code >= 400:
+                r.raise_for_status()
+
+            async for chunk in r.aiter_bytes():
+                yield chunk

@@ -3,31 +3,41 @@ import json
 import os
 import re
 import shlex
+from dataclasses import dataclass, field
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
 from sys import argv
+from typing import BinaryIO
+from zoneinfo import ZoneInfo
 
 import httpx
 import keyring
 import psutil
 import rich_click as click
-from rich import print
 from rich.console import Console
 from rich.syntax import Syntax
 from rich.traceback import install as install_traceback
-from zoneinfo import ZoneInfo
 
-from ._jon import Jon
+from ._jon import Jon, PgDumpResponse
 from ._warg import WargShell
+
+console = Console(stderr=True)
 
 
 def validate_domain(ctx, param, value):
-    domain_pattern = r"^(https?:\/\/)?(localhost|(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})|([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,6})(:(\d{1,5}))?(\/.*)?$"
+    domain_pattern = (
+        r"^(https?:\/\/)?(localhost|(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})"
+        r"|([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,6})"
+        r"(:(\d{1,5}))?(\/.*)?$"
+    )
     if not re.match(domain_pattern, value):
-        raise click.BadParameter(
-            'Invalid domain. Please provide a valid hostname, IP address, or "localhost", optionally prefixed with http:// or https://, and optionally followed by a port number.'
+        msg = (
+            "Invalid domain. Please provide a valid hostname, IP address, or "
+            '"localhost", optionally prefixed with http:// or https://, and '
+            "optionally followed by a port number."
         )
+        raise click.BadParameter(msg)
     return value
 
 
@@ -114,7 +124,6 @@ def main():
 @arun
 async def auth(token, domain):
     jon = Jon(domain)
-    console = Console()
     success = False
 
     with console.status("[bold blue]Authenticating...", spinner="dots"):
@@ -127,9 +136,9 @@ async def auth(token, domain):
                 raise
 
     if success:
-        print("[green bold]✓ Auth successful")
+        console.print("[green bold]✓ Auth successful")
     else:
-        print("[red bold]✗ Auth failed")
+        console.print("[red bold]✗ Auth failed")
 
 
 @main.command()
@@ -139,12 +148,10 @@ async def auth(token, domain):
 @click.argument("component", type=str)
 @arun
 async def shell(domain, product, env, component):
-    console = Console()
-
     with console.status("[bold blue]Connecting...", spinner="dots"):
         if not (info := keyring.get_password("warg-shell", domain)):
             cli = detect_cli(domain)
-            print("[red bold]Not authenticated, please run:")
+            console.print("[red bold]Not authenticated, please run:")
             syntax = Syntax(cli, "bash")
             console.print(syntax)
             exit(1)
@@ -154,7 +161,7 @@ async def shell(domain, product, env, component):
 
         if datetime.now(ZoneInfo("UTC")) > valid_until:
             cli = detect_cli(domain)
-            print("[red bold]Auth token expired, please run:")
+            console.print("[red bold]Auth token expired, please run:")
             syntax = Syntax(cli, "bash")
             console.print(syntax)
             exit(1)
@@ -166,7 +173,89 @@ async def shell(domain, product, env, component):
         warg = WargShell(ws_url.url)
         await warg.connect_tty()
     else:
-        print(f"[red bold]{ws_url.error}")
+        console.print(f"[red bold]{ws_url.error}")
+
+
+@dataclass
+class DumperChecker:
+    """Follows what we write to the file to know if at the end we find the
+    sequence we expect."""
+
+    expected: bytes
+    output: BinaryIO
+    _last_bytes: bytes = field(init=False, default=b"")
+
+    def dump(self, data: bytes):
+        self._last_bytes = (self._last_bytes + data)[-len(self.expected) :]
+        self.output.write(data)
+
+    def check(self) -> bool:
+        return self._last_bytes == self.expected
+
+
+@main.command()
+@click.argument("domain", callback=validate_domain)
+@click.argument("product", type=str)
+@click.argument("env", type=str)
+@click.argument("db", type=str)
+@click.option(
+    "-o",
+    "--output",
+    default="-",
+    type=click.File("wb"),
+    help="Output file (default: stdout)",
+)
+@arun
+async def pg_dump(
+    domain: str,
+    product: str,
+    env: str,
+    db: str,
+    output: BinaryIO,
+):
+    with console.status("[bold blue]🔭 Connecting...", spinner="dots"):
+        if not (info := keyring.get_password("warg-shell", domain)):
+            cli = detect_cli(domain)
+            console.print("[red bold]Not authenticated, please run:")
+            syntax = Syntax(cli, "bash")
+            console.print(syntax)
+            exit(1)
+
+        info = json.loads(info)
+        valid_until = datetime.fromisoformat(info["valid_until"])
+
+        if datetime.now(ZoneInfo("UTC")) > valid_until:
+            cli = detect_cli(domain)
+            console.print("[red bold]Auth token expired, please run:")
+            syntax = Syntax(cli, "bash")
+            console.print(syntax)
+            exit(1)
+
+        jon = Jon(domain)
+        data = jon.get_pg_dump(info["token"], product, env, db)
+        dc = DumperChecker(
+            expected=b"\n\n--\n-- PostgreSQL database dump complete\n--\n\n",
+            output=output,
+        )
+
+        async for chunk in data:
+            if isinstance(chunk, PgDumpResponse):
+                if not chunk.success:
+                    console.print(f"[red bold]{chunk.error}")
+                    exit(1)
+            else:
+                dc.dump(chunk)
+                break
+
+    with console.status("[bold green]🎣 Downloading...", spinner="dots"):
+        async for chunk in data:
+            dc.dump(chunk)
+
+    if not dc.check():
+        console.print("[red bold]⚠️ Dump looks incomplete")
+        exit(2)
+
+    console.print("[green bold]📚 Dump downloaded successfully")
 
 
 if __name__ == "__main__":
