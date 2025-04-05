@@ -82,6 +82,7 @@ class Jon:
                 env=env,
                 db=db,
             ),
+            timeout=300,
         ) as r:
             if r.status_code in [400, 404]:
                 error_content = await r.aread()
