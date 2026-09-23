@@ -3,16 +3,17 @@ import json
 import os
 import re
 import shlex
+import sys
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import wraps
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from sys import argv
 from typing import BinaryIO
-from zoneinfo import ZoneInfo
 
 import httpx
 import keyring
+import keyring.errors
 import psutil
 import rich_click as click
 from rich.console import Console
@@ -41,11 +42,17 @@ def validate_domain(ctx, param, value):
     return value
 
 
+def _is_program(arg: str, name: str) -> bool:
+    """Whether ``arg`` is ``name`` itself or a path to it, on any platform."""
+    base = PureWindowsPath(arg).name if "\\" in arg else PurePosixPath(arg).name
+    return base.lower() in {name, f"{name}.exe"}
+
+
 def detect_uvx_cli(a: list[str]) -> list[str]:
     if len(a) < 3:
         return []
 
-    if a[0] != "uv" and not a[0].endswith("/uv"):
+    if not _is_program(a[0], "uv"):
         return []
 
     if a[1] != "tool" or a[2] != "uvx":
@@ -78,7 +85,7 @@ def detect_direct_cli(a: list[str]) -> list[str]:
     if len(a) < 1:
         return []
 
-    if a[0] == "warg-shell" or a[0].endswith("/warg-shell"):
+    if _is_program(a[0], "warg-shell"):
         return ["warg-shell"]
 
     return []
@@ -113,6 +120,64 @@ def arun(func):
     return wrapper
 
 
+KEYRING_SERVICE = "warg-shell"
+
+
+def _no_keyring_help() -> str:
+    """
+    Explain what to do when ``keyring`` found nowhere to store the token.
+
+    Returns
+    -------
+    str
+        Rich-formatted, platform-specific advice.
+    """
+    from ._keyring import find_powershell, is_wsl
+
+    if is_wsl() and find_powershell() is None:
+        return (
+            "Running under WSL but [bold]powershell.exe[/] is not reachable, so "
+            "the token cannot be stored in the Windows Credential Manager.\n"
+            "Enable Windows interop in [bold]/etc/wsl.conf[/] "
+            "([dim][interop] enabled=true[/]) or make sure the Windows drive is "
+            "mounted under [bold]/mnt/c[/]."
+        )
+
+    return (
+        "No keyring backend is available to store the token.\n"
+        "On Linux, start a Secret Service daemon (GNOME Keyring, KWallet, "
+        "KeePassXC…); on a headless box you can use the "
+        "[bold]keyrings.alt[/] package."
+    )
+
+
+def keyring_get(domain: str) -> str | None:
+    """
+    Read the stored auth info for a domain.
+
+    Returns
+    -------
+    str | None
+        The JSON blob stored by ``auth``, or ``None``.
+    """
+    try:
+        return keyring.get_password(KEYRING_SERVICE, domain)
+    except keyring.errors.NoKeyringError:
+        console.print("[red bold]✗ Cannot read the auth token")
+        console.print(_no_keyring_help())
+        sys.exit(1)
+
+
+def keyring_set(domain: str, value: str) -> None:
+    """Store the auth info for a domain, or explain why it cannot be done."""
+    try:
+        keyring.set_password(KEYRING_SERVICE, domain, value)
+    except keyring.errors.NoKeyringError:
+        console.print("[red bold]✗ Auth succeeded but the token cannot be stored")
+        console.print(_no_keyring_help())
+        sys.exit(1)
+
+
 @click.group()
 def main():
     install_traceback()
@@ -129,7 +194,7 @@ async def auth(token, domain):
     with console.status("[bold blue]Authenticating...", spinner="dots"):
         try:
             auth_token = await jon.get_auth_token(token)
-            keyring.set_password("warg-shell", domain, json.dumps(auth_token))
+            keyring_set(domain, json.dumps(auth_token))
             success = True
         except httpx.HTTPStatusError as e:
             if e.response.status_code != 403:
@@ -149,7 +214,7 @@ async def auth(token, domain):
 @arun
 async def shell(domain, product, env, component):
     with console.status("[bold blue]Connecting...", spinner="dots"):
-        if not (info := keyring.get_password("warg-shell", domain)):
+        if not (info := keyring_get(domain)):
             cli = detect_cli(domain)
             console.print("[red bold]Not authenticated, please run:")
             syntax = Syntax(cli, "bash")
@@ -159,7 +224,7 @@ async def shell(domain, product, env, component):
         info = json.loads(info)
         valid_until = datetime.fromisoformat(info["valid_until"])
 
-        if datetime.now(ZoneInfo("UTC")) > valid_until:
+        if datetime.now(UTC) > valid_until:
             cli = detect_cli(domain)
             console.print("[red bold]Auth token expired, please run:")
             syntax = Syntax(cli, "bash")
@@ -176,21 +241,48 @@ async def shell(domain, product, env, component):
         console.print(f"[red bold]{ws_url.error}")
 
 
+PG_DUMP_FOOTER = b"\n\n--\n-- PostgreSQL database dump complete\n--\n\n"
+
+# Since the fix for CVE-2025-8714 (PostgreSQL 17.6 / 16.10 / 15.14 / 14.19 /
+# 13.22), plain dumps end with ``\\unrestrict <random key>`` *after* the
+# footer. The key is 63 alphanumeric characters by default but can be any
+# length when passed explicitly with --restrict-key.
+PG_DUMP_TRAILER = re.compile(rb"\\unrestrict [A-Za-z0-9]+\n\n$")
+
+
 @dataclass
 class DumperChecker:
-    """Follows what we write to the file to know if at the end we find the
-    sequence we expect."""
+    """
+    Tee for the dump stream that remembers its tail.
 
-    expected: bytes
+    Lets us check, once everything is written, that the stream ended with
+    the PostgreSQL footer, optionally followed by the ``\\unrestrict``
+    trailer of recent versions.
+    """
+
     output: BinaryIO
+    footer: bytes = PG_DUMP_FOOTER
+    tail_size: int = 4096
     _last_bytes: bytes = field(init=False, default=b"")
 
     def dump(self, data: bytes):
-        self._last_bytes = (self._last_bytes + data)[-len(self.expected) :]
+        """Write ``data`` through and remember the last ``tail_size`` bytes."""
+        self._last_bytes = (self._last_bytes + data)[-self.tail_size :]
         self.output.write(data)
 
     def check(self) -> bool:
-        return self._last_bytes == self.expected
+        """
+        Tell whether the stream ended like a complete dump.
+
+        Returns
+        -------
+        bool
+            ``True`` if the tail is ``footer`` + optional trailer.
+        """
+        tail = self._last_bytes
+        if match := PG_DUMP_TRAILER.search(tail):
+            tail = tail[: match.start()]
+        return tail.endswith(self.footer)
 
 
 @main.command()
@@ -214,7 +306,7 @@ async def pg_dump(
     output: BinaryIO,
 ):
     with console.status("[bold blue]🔭 Connecting...", spinner="dots"):
-        if not (info := keyring.get_password("warg-shell", domain)):
+        if not (info := keyring_get(domain)):
             cli = detect_cli(domain)
             console.print("[red bold]Not authenticated, please run:")
             syntax = Syntax(cli, "bash")
@@ -224,7 +316,7 @@ async def pg_dump(
         info = json.loads(info)
         valid_until = datetime.fromisoformat(info["valid_until"])
 
-        if datetime.now(ZoneInfo("UTC")) > valid_until:
+        if datetime.now(UTC) > valid_until:
             cli = detect_cli(domain)
             console.print("[red bold]Auth token expired, please run:")
             syntax = Syntax(cli, "bash")
@@ -233,10 +325,7 @@ async def pg_dump(
 
         jon = Jon(domain)
         data = jon.get_pg_dump(info["token"], product, env, db)
-        dc = DumperChecker(
-            expected=b"\n\n--\n-- PostgreSQL database dump complete\n--\n\n",
-            output=output,
-        )
+        dc = DumperChecker(output=output)
 
         async for chunk in data:
             if isinstance(chunk, PgDumpResponse):
