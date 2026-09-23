@@ -27,14 +27,17 @@ class WargShell:
         """Run the session until the remote closes or stdin hits EOF."""
         try:
             self.terminal.enter_raw()
-            async with websockets.connect(self.ws_url) as ws:
+            # A console can legitimately send a huge blob in one message
+            # (``cat`` of a big file), so don't let the default 1 MiB limit
+            # kill the session.
+            async with websockets.connect(self.ws_url, max_size=None) as ws:
                 await self.send_resize(ws)
                 tasks = [
                     self.loop.create_task(self.stdin_to_ws(ws)),
                     self.loop.create_task(self.ws_to_stdout(ws)),
                     self.loop.create_task(self.handle_resize(ws)),
                 ]
-                _, pending = await asyncio.wait(
+                done, pending = await asyncio.wait(
                     tasks, return_when=asyncio.FIRST_COMPLETED
                 )
                 for task in pending:
@@ -43,10 +46,21 @@ class WargShell:
                         await task
                     except asyncio.CancelledError:
                         pass
+                # Surface whatever made the first task stop instead of
+                # dying silently.
+                for task in done:
+                    task.result()
+        except websockets.exceptions.ConnectionClosedError as e:
+            error = f"Connection closed by the remote: {e}\n"
         except Exception as e:
-            sys.stderr.write(f"Connection error: {e}\n")
+            error = f"Connection error: {e}\n"
+        else:
+            error = None
         finally:
             self.terminal.restore()
+
+        if error:
+            sys.stderr.write(error)
 
     def on_resize(self, signum=None, frame=None):
         """Signal-handler-compatible hook flagging that the size changed."""
@@ -93,17 +107,13 @@ class WargShell:
             pass
 
     async def ws_to_stdout(self, ws):
-        """Print whatever the remote sends."""
+        """Print whatever the remote sends; an abnormal close propagates."""
         try:
             async for message in ws:
                 data = json.loads(message)
                 if data["op"] == "stdout":
                     self.terminal.write_stdout(data["data"])
-        except (
-            websockets.exceptions.ConnectionClosedOK,
-            websockets.exceptions.ConnectionClosedError,
-            asyncio.CancelledError,
-        ):
+        except (websockets.exceptions.ConnectionClosedOK, asyncio.CancelledError):
             pass
 
     async def handle_resize(self, ws):

@@ -221,3 +221,38 @@ def test_windows_terminal_without_console(fake_tty):
         terminal.restore()
 
     asyncio.run(run())
+
+
+async def test_large_output_burst_is_printed(fake_warg, fake_tty, terminal):
+    """A multi-MiB message and a flood of small ones both make it to stdout."""
+    fake_warg.burst = "x" * (3 * 1024 * 1024)
+    warg = WargShell(fake_warg.url, terminal)
+
+    async def drive():
+        await fake_tty.wait_for("Welcome")
+        fake_tty.type("burst\n")
+        await fake_tty.wait_for("BURST-DONE")
+        fake_tty.type("flood\n")
+        await fake_tty.wait_for("FLOOD-DONE")
+        fake_tty.type("exit\n")
+
+    await asyncio.wait_for(asyncio.gather(warg.connect_tty(), drive()), timeout=30)
+
+    out = fake_tty.output()
+    assert out.count("x") == 3 * 1024 * 1024
+    assert out.count("line\r\n") == 5000
+
+
+async def test_remote_error_close_is_reported(fake_warg, fake_tty, terminal, capsys):
+    """An abnormal close by the remote is told to the user, not swallowed."""
+    warg = WargShell(fake_warg.url, terminal)
+
+    async def drive():
+        await fake_tty.wait_for("Welcome")
+        fake_tty.type("crash\n")
+
+    await asyncio.wait_for(asyncio.gather(warg.connect_tty(), drive()), timeout=5)
+
+    err = capsys.readouterr().err
+    assert "1011" in err
+    assert "boom" in err

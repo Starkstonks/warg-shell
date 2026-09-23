@@ -262,6 +262,7 @@ class FakeWarg:
     url: str = ""
     received: list[dict[str, Any]] = field(default_factory=list)
     greeting: str = "Welcome to the fake console\r\n"
+    burst: str = "x" * 1024
     connections: int = 0
     message_received: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -288,14 +289,32 @@ class FakeWarg:
                 if msg["op"] == "resize" and len(self.received) == 1:
                     await ws.send(json.dumps({"op": "stdout", "data": self.greeting}))
                 elif msg["op"] == "stdin":
+                    await self._on_stdin(ws, msg["data"])
                     if "exit" in msg["data"]:
-                        await ws.close()
                         return
-                    await ws.send(
-                        json.dumps({"op": "stdout", "data": f"echo: {msg['data']}"})
-                    )
         except websockets.exceptions.ConnectionClosed:
             pass
+
+    async def _on_stdin(self, ws: ServerConnection, data: str) -> None:
+        """Commands understood by the fake console."""
+
+        def out(text: str) -> str:
+            return json.dumps({"op": "stdout", "data": text})
+
+        if "exit" in data:
+            await ws.close()
+        elif "crash" in data:
+            await ws.close(code=1011, reason="boom")
+        elif "burst" in data:
+            # One giant message, above websockets' default 1 MiB max_size.
+            await ws.send(out(self.burst + "\r\nBURST-DONE\r\n"))
+        elif "flood" in data:
+            # Many small messages faster than a terminal could drain them.
+            for _ in range(5000):
+                await ws.send(out("line\r\n"))
+            await ws.send(out("FLOOD-DONE\r\n"))
+        else:
+            await ws.send(out(f"echo: {data}"))
 
 
 @pytest.fixture
