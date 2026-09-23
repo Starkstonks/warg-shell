@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shlex
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import wraps
@@ -12,6 +13,7 @@ from typing import BinaryIO
 
 import httpx
 import keyring
+import keyring.errors
 import psutil
 import rich_click as click
 from rich.console import Console
@@ -118,6 +120,64 @@ def arun(func):
     return wrapper
 
 
+KEYRING_SERVICE = "warg-shell"
+
+
+def _no_keyring_help() -> str:
+    """
+    Explain what to do when ``keyring`` found nowhere to store the token.
+
+    Returns
+    -------
+    str
+        Rich-formatted, platform-specific advice.
+    """
+    from ._keyring import find_powershell, is_wsl
+
+    if is_wsl() and find_powershell() is None:
+        return (
+            "Running under WSL but [bold]powershell.exe[/] is not reachable, so "
+            "the token cannot be stored in the Windows Credential Manager.\n"
+            "Enable Windows interop in [bold]/etc/wsl.conf[/] "
+            "([dim][interop] enabled=true[/]) or make sure the Windows drive is "
+            "mounted under [bold]/mnt/c[/]."
+        )
+
+    return (
+        "No keyring backend is available to store the token.\n"
+        "On Linux, start a Secret Service daemon (GNOME Keyring, KWallet, "
+        "KeePassXC…); on a headless box you can use the "
+        "[bold]keyrings.alt[/] package."
+    )
+
+
+def keyring_get(domain: str) -> str | None:
+    """
+    Read the stored auth info for a domain.
+
+    Returns
+    -------
+    str | None
+        The JSON blob stored by ``auth``, or ``None``.
+    """
+    try:
+        return keyring.get_password(KEYRING_SERVICE, domain)
+    except keyring.errors.NoKeyringError:
+        console.print("[red bold]✗ Cannot read the auth token")
+        console.print(_no_keyring_help())
+        sys.exit(1)
+
+
+def keyring_set(domain: str, value: str) -> None:
+    """Store the auth info for a domain, or explain why it cannot be done."""
+    try:
+        keyring.set_password(KEYRING_SERVICE, domain, value)
+    except keyring.errors.NoKeyringError:
+        console.print("[red bold]✗ Auth succeeded but the token cannot be stored")
+        console.print(_no_keyring_help())
+        sys.exit(1)
+
+
 @click.group()
 def main():
     install_traceback()
@@ -134,7 +194,7 @@ async def auth(token, domain):
     with console.status("[bold blue]Authenticating...", spinner="dots"):
         try:
             auth_token = await jon.get_auth_token(token)
-            keyring.set_password("warg-shell", domain, json.dumps(auth_token))
+            keyring_set(domain, json.dumps(auth_token))
             success = True
         except httpx.HTTPStatusError as e:
             if e.response.status_code != 403:
@@ -154,7 +214,7 @@ async def auth(token, domain):
 @arun
 async def shell(domain, product, env, component):
     with console.status("[bold blue]Connecting...", spinner="dots"):
-        if not (info := keyring.get_password("warg-shell", domain)):
+        if not (info := keyring_get(domain)):
             cli = detect_cli(domain)
             console.print("[red bold]Not authenticated, please run:")
             syntax = Syntax(cli, "bash")
@@ -223,7 +283,7 @@ async def pg_dump(
     output: BinaryIO,
 ):
     with console.status("[bold blue]🔭 Connecting...", spinner="dots"):
-        if not (info := keyring.get_password("warg-shell", domain)):
+        if not (info := keyring_get(domain)):
             cli = detect_cli(domain)
             console.print("[red bold]Not authenticated, please run:")
             syntax = Syntax(cli, "bash")

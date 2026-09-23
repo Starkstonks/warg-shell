@@ -36,6 +36,9 @@ Issues = "https://github.com/Starkstonks/warg-shell/issues"
 [project.scripts]
 warg-shell = "warg_shell._cli:main"
 
+[project.entry-points."keyring.backends"]
+warg_shell_wsl = "warg_shell._keyring"
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",

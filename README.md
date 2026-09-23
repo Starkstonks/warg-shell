@@ -26,6 +26,17 @@ You can also download a dump of a database:
 uvx warg-shell pg-dump <your-domain> <your-product> <your-env> <your-db> -o dump.sql
 ```
 
+## Where is the token stored?
+
+The auth token goes through [keyring](https://pypi.org/project/keyring/), so
+it ends up in your platform's credential store: Secret Service / KWallet on
+Linux, Keychain on macOS, Credential Manager on Windows.
+
+Under **WSL** there is usually no credential store, so `warg-shell` ships a
+small backend that stores the token in the **Windows** Credential Manager
+through `powershell.exe`. Nothing to install or configure, as long as WSL
+interop is enabled (it is by default).
+
 ## Development
 
 The project is managed with [uv](https://docs.astral.sh/uv/) and requires
