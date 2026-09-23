@@ -37,3 +37,18 @@ make clean         # ruff format + ruff check --fix
 make test          # pytest
 uv build           # build the sdist and the wheel into dist/
 ```
+
+### Releasing
+
+Releases are published to PyPI by the `Release` GitHub workflow through
+[trusted publishing](https://docs.pypi.org/trusted-publishers/) — no API token
+is involved. To cut a release:
+
+1. Bump the version in `pyproject.toml` (`uv version 1.2.0`) and merge to
+   `master` following git-flow.
+2. Tag the merge commit with the bare version (`git tag 1.2.0`) and push the
+   tag. The workflow runs the CI, checks that the tag matches the project
+   version, builds the sdist and wheel, and uploads them.
+
+The workflow publishes from the `pypi` GitHub environment, which is what the
+trusted publisher is registered against on PyPI.
