@@ -4,12 +4,11 @@ import os
 import re
 import shlex
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import wraps
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from sys import argv
 from typing import BinaryIO
-from zoneinfo import ZoneInfo
 
 import httpx
 import keyring
@@ -41,11 +40,17 @@ def validate_domain(ctx, param, value):
     return value
 
 
+def _is_program(arg: str, name: str) -> bool:
+    """Whether ``arg`` is ``name`` itself or a path to it, on any platform."""
+    base = PureWindowsPath(arg).name if "\\" in arg else PurePosixPath(arg).name
+    return base.lower() in {name, f"{name}.exe"}
+
+
 def detect_uvx_cli(a: list[str]) -> list[str]:
     if len(a) < 3:
         return []
 
-    if a[0] != "uv" and not a[0].endswith("/uv"):
+    if not _is_program(a[0], "uv"):
         return []
 
     if a[1] != "tool" or a[2] != "uvx":
@@ -78,7 +83,7 @@ def detect_direct_cli(a: list[str]) -> list[str]:
     if len(a) < 1:
         return []
 
-    if a[0] == "warg-shell" or a[0].endswith("/warg-shell"):
+    if _is_program(a[0], "warg-shell"):
         return ["warg-shell"]
 
     return []
@@ -159,7 +164,7 @@ async def shell(domain, product, env, component):
         info = json.loads(info)
         valid_until = datetime.fromisoformat(info["valid_until"])
 
-        if datetime.now(ZoneInfo("UTC")) > valid_until:
+        if datetime.now(UTC) > valid_until:
             cli = detect_cli(domain)
             console.print("[red bold]Auth token expired, please run:")
             syntax = Syntax(cli, "bash")
@@ -178,8 +183,12 @@ async def shell(domain, product, env, component):
 
 @dataclass
 class DumperChecker:
-    """Follows what we write to the file to know if at the end we find the
-    sequence we expect."""
+    """
+    Tee for the dump stream that remembers its tail.
+
+    Lets us check, once everything is written, that the stream ended with
+    the sequence we expect.
+    """
 
     expected: bytes
     output: BinaryIO
@@ -224,7 +233,7 @@ async def pg_dump(
         info = json.loads(info)
         valid_until = datetime.fromisoformat(info["valid_until"])
 
-        if datetime.now(ZoneInfo("UTC")) > valid_until:
+        if datetime.now(UTC) > valid_until:
             cli = detect_cli(domain)
             console.print("[red bold]Auth token expired, please run:")
             syntax = Syntax(cli, "bash")

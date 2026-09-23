@@ -1,26 +1,32 @@
+"""Bridge between the local terminal and a Warg console websocket."""
+
 import argparse
 import asyncio
 import json
-import os
-import signal
 import sys
-import termios
-import tty
 
 import websockets
 
+from ._terminal import Terminal, make_terminal
+
 
 class WargShell:
-    def __init__(self, ws_url):
+    """Pipe the local terminal to a remote console over a websocket.
+
+    The protocol is a stream of JSON messages: ``{"op": "stdin", "data": ...}``
+    and ``{"op": "resize", "height": ..., "width": ...}`` going up,
+    ``{"op": "stdout", "data": ...}`` coming down.
+    """
+
+    def __init__(self, ws_url: str, terminal: Terminal | None = None):
         self.ws_url = ws_url
         self.loop = asyncio.get_event_loop()
-        self.stdin_fd = sys.stdin.fileno()
-        self.old_tty_attrs = termios.tcgetattr(self.stdin_fd)
-        self.resize_event = asyncio.Event()
+        self.terminal = terminal or make_terminal(self.loop)
 
     async def connect_tty(self):
+        """Run the session until the remote closes or stdin hits EOF."""
         try:
-            self.set_raw_terminal()
+            self.terminal.enter_raw()
             async with websockets.connect(self.ws_url) as ws:
                 await self.send_resize(ws)
                 tasks = [
@@ -40,51 +46,34 @@ class WargShell:
         except Exception as e:
             sys.stderr.write(f"Connection error: {e}\n")
         finally:
-            self.restore_terminal()
+            self.terminal.restore()
 
-    def set_raw_terminal(self):
-        # Set terminal to raw mode
-        tty.setraw(self.stdin_fd)
-        # Disable echo
-        attrs = termios.tcgetattr(self.stdin_fd)
-        attrs[3] = attrs[3] & ~termios.ECHO
-        termios.tcsetattr(self.stdin_fd, termios.TCSADRAIN, attrs)
-        # Set resize signal handler
-        signal.signal(signal.SIGWINCH, self.on_resize)
+    def on_resize(self, signum=None, frame=None):
+        """Signal-handler-compatible hook flagging that the size changed."""
+        self.terminal.resize_event.set()
 
-    def restore_terminal(self):
-        # Restore terminal settings
-        termios.tcsetattr(self.stdin_fd, termios.TCSADRAIN, self.old_tty_attrs)
-        # Reset signal handler
-        signal.signal(signal.SIGWINCH, signal.SIG_DFL)
+    def get_terminal_size(self) -> tuple[int, int]:
+        """
+        Measure the local terminal.
 
-    def on_resize(self, signum, frame):
-        self.resize_event.set()
+        Returns
+        -------
+        tuple[int, int]
+            ``(rows, cols)`` as expected by the ``resize`` message.
+        """
+        return self.terminal.size()
 
     async def send_resize(self, ws):
-        # Send initial window size
+        """Tell the remote what size the local terminal is."""
         rows, cols = self.get_terminal_size()
         resize_msg = {"op": "resize", "height": rows, "width": cols}
         await ws.send(json.dumps(resize_msg))
 
-    def get_terminal_size(self):
-        # Return terminal (rows, cols)
-        try:
-            size = os.get_terminal_size(self.stdin_fd)
-            return size.lines, size.columns
-        except OSError:
-            return 24, 80  # Default if unable to get size
-
     async def stdin_to_ws(self, ws):
-        loop = self.loop
-        reader = asyncio.StreamReader()
-        protocol = asyncio.StreamReaderProtocol(reader)
-
-        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
-
+        """Forward keystrokes to the remote until EOF."""
         try:
             while True:
-                data = await reader.read(1024)
+                data = await self.terminal.read_stdin()
 
                 if not data:
                     break
@@ -104,12 +93,12 @@ class WargShell:
             pass
 
     async def ws_to_stdout(self, ws):
+        """Print whatever the remote sends."""
         try:
             async for message in ws:
                 data = json.loads(message)
                 if data["op"] == "stdout":
-                    sys.stdout.write(data["data"])
-                    sys.stdout.flush()
+                    self.terminal.write_stdout(data["data"])
         except (
             websockets.exceptions.ConnectionClosedOK,
             websockets.exceptions.ConnectionClosedError,
@@ -118,13 +107,11 @@ class WargShell:
             pass
 
     async def handle_resize(self, ws):
+        """Push the new size to the remote whenever the window is resized."""
         try:
             while True:
-                await self.resize_event.wait()
-                self.resize_event.clear()
-                rows, cols = self.get_terminal_size()
-                resize_msg = {"op": "resize", "height": rows, "width": cols}
-                await ws.send(json.dumps(resize_msg))
+                await self.terminal.wait_resize()
+                await self.send_resize(ws)
         except (
             websockets.exceptions.ConnectionClosedOK,
             websockets.exceptions.ConnectionClosedError,
@@ -135,6 +122,7 @@ class WargShell:
 
 
 async def main():
+    """Connect straight to a websocket URL, bypassing Jon (debug helper)."""
     parser = argparse.ArgumentParser(
         description="Connect to remote shell via WebSocket."
     )

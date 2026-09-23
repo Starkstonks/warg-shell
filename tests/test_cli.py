@@ -81,6 +81,17 @@ def test_detect_direct_cli():
     assert detect_direct_cli(["/usr/bin/something"]) == []
 
 
+def test_detect_cli_on_windows_paths():
+    """Windows executables (``.exe``, backslashes, any case) are recognised."""
+    assert detect_direct_cli([r"C:\Users\me\.local\bin\warg-shell.exe"]) == [
+        "warg-shell"
+    ]
+    assert detect_direct_cli(["WARG-SHELL.EXE"]) == ["warg-shell"]
+    assert detect_uvx_cli(
+        [r"C:\Users\me\.cargo\bin\uv.exe", "tool", "uvx", "warg-shell", "shell"]
+    ) == ["uvx", "warg-shell"]
+
+
 def test_dumper_checker():
     """Bytes are written through and the tail is matched across chunks."""
     out = io.BytesIO()
