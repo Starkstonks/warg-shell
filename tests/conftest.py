@@ -9,6 +9,7 @@ keyring is swapped for an in-memory backend.
 
 import asyncio
 import json
+import socketserver
 import threading
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
@@ -98,6 +99,20 @@ class FakeJon:
         return json.dumps(
             {"token": self.auth_token, "valid_until": self.valid_until.isoformat()}
         )
+
+
+class _QuietHTTPServer(ThreadingHTTPServer):
+    """HTTP server that skips the reverse DNS lookup of ``server_bind``.
+
+    ``HTTPServer.server_bind`` calls ``socket.getfqdn()``, which can stall
+    for tens of seconds on hosts without reverse DNS (macOS CI runners).
+    """
+
+    def server_bind(self):
+        """Bind without resolving our own name."""
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = "127.0.0.1"
+        self.server_port = self.server_address[1]
 
 
 class _JsonHandler(BaseHTTPRequestHandler):
@@ -214,7 +229,7 @@ def _jon_server() -> Iterator[FakeJon]:
         The state object bound to the running server.
     """
     state = FakeJon()
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _make_handler(state))
+    server = _QuietHTTPServer(("127.0.0.1", 0), _make_handler(state))
     state.port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
