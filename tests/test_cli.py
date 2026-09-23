@@ -92,16 +92,47 @@ def test_detect_cli_on_windows_paths():
     ) == ["uvx", "warg-shell"]
 
 
-def test_dumper_checker():
-    """Bytes are written through and the tail is matched across chunks."""
+def test_dumper_checker_writes_through_and_matches_across_chunks():
+    """Bytes are written through and the footer is matched across chunks."""
     out = io.BytesIO()
-    dc = DumperChecker(expected=b"END\n", output=out)
+    dc = DumperChecker(output=out, footer=b"END\n")
     dc.dump(b"some ")
     dc.dump(b"data EN")
     assert not dc.check()
     dc.dump(b"D\n")
     assert dc.check()
     assert out.getvalue() == b"some data END\n"
+
+
+PG_FOOTER = b"CREATE TABLE foo();\n\n--\n-- PostgreSQL database dump complete\n--\n\n"
+
+
+@pytest.mark.parametrize(
+    ("tail", "complete"),
+    [
+        pytest.param(PG_FOOTER, True, id="pre-17.6"),
+        pytest.param(
+            PG_FOOTER + b"\\unrestrict " + b"aB3" * 21 + b"\n\n",
+            True,
+            id="post-17.6-random-key",
+        ),
+        pytest.param(
+            PG_FOOTER + b"\\unrestrict test\n\n", True, id="explicit-restrict-key"
+        ),
+        pytest.param(PG_FOOTER[:-10], False, id="truncated-footer"),
+        pytest.param(PG_FOOTER + b"\\unrestrict aB3", False, id="truncated-trailer"),
+        pytest.param(
+            PG_FOOTER + b"\\unrestrict aB3\n\nmore stuff", False, id="junk-after"
+        ),
+        pytest.param(PG_FOOTER + b"\n", False, id="extra-newline"),
+    ],
+)
+def test_dumper_checker_pg_dump_endings(tail, complete):
+    """Both the historical footer and the CVE-2025-8714 trailer are accepted."""
+    dc = DumperChecker(output=io.BytesIO())
+    dc.dump(b"-- header\n")
+    dc.dump(tail)
+    assert dc.check() is complete
 
 
 def test_auth_stores_token_in_keyring(runner, fake_jon, memory_keyring):

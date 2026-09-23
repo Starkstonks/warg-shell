@@ -24,7 +24,10 @@ import pytest
 import websockets
 from websockets.asyncio.server import ServerConnection, serve
 
-PG_DUMP_FOOTER = b"\n\n--\n-- PostgreSQL database dump complete\n--\n\n"
+PG_DUMP_FOOTER = (
+    b"\n\n--\n-- PostgreSQL database dump complete\n--\n\n"
+    b"\\unrestrict Tg7wTG8gYCTfm6eBY9z9RiPjHJhTSHeRJnH2gyaDBn6kJcZT5Tfjf0G7Lcp1ZZi\n\n"
+)
 
 
 class InMemoryKeyring(keyring.backend.KeyringBackend):

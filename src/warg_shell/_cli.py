@@ -241,25 +241,48 @@ async def shell(domain, product, env, component):
         console.print(f"[red bold]{ws_url.error}")
 
 
+PG_DUMP_FOOTER = b"\n\n--\n-- PostgreSQL database dump complete\n--\n\n"
+
+# Since the fix for CVE-2025-8714 (PostgreSQL 17.6 / 16.10 / 15.14 / 14.19 /
+# 13.22), plain dumps end with ``\\unrestrict <random key>`` *after* the
+# footer. The key is 63 alphanumeric characters by default but can be any
+# length when passed explicitly with --restrict-key.
+PG_DUMP_TRAILER = re.compile(rb"\\unrestrict [A-Za-z0-9]+\n\n$")
+
+
 @dataclass
 class DumperChecker:
     """
     Tee for the dump stream that remembers its tail.
 
     Lets us check, once everything is written, that the stream ended with
-    the sequence we expect.
+    the PostgreSQL footer, optionally followed by the ``\\unrestrict``
+    trailer of recent versions.
     """
 
-    expected: bytes
     output: BinaryIO
+    footer: bytes = PG_DUMP_FOOTER
+    tail_size: int = 4096
     _last_bytes: bytes = field(init=False, default=b"")
 
     def dump(self, data: bytes):
-        self._last_bytes = (self._last_bytes + data)[-len(self.expected) :]
+        """Write ``data`` through and remember the last ``tail_size`` bytes."""
+        self._last_bytes = (self._last_bytes + data)[-self.tail_size :]
         self.output.write(data)
 
     def check(self) -> bool:
-        return self._last_bytes == self.expected
+        """
+        Tell whether the stream ended like a complete dump.
+
+        Returns
+        -------
+        bool
+            ``True`` if the tail is ``footer`` + optional trailer.
+        """
+        tail = self._last_bytes
+        if match := PG_DUMP_TRAILER.search(tail):
+            tail = tail[: match.start()]
+        return tail.endswith(self.footer)
 
 
 @main.command()
@@ -302,10 +325,7 @@ async def pg_dump(
 
         jon = Jon(domain)
         data = jon.get_pg_dump(info["token"], product, env, db)
-        dc = DumperChecker(
-            expected=b"\n\n--\n-- PostgreSQL database dump complete\n--\n\n",
-            output=output,
-        )
+        dc = DumperChecker(output=output)
 
         async for chunk in data:
             if isinstance(chunk, PgDumpResponse):
