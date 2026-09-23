@@ -1,7 +1,11 @@
 .idea/
+.venv/
+.ruff_cache/
+.pytest_cache/
 dist/
 
 *.swp
 *.un~
 
+__pycache__/
 *.py[oc]

@@ -2,7 +2,6 @@ import json
 import re
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import Union
 
 import httpx
 
@@ -72,7 +71,7 @@ class Jon:
 
     async def get_pg_dump(
         self, token: str, product: str, env: str, db: str
-    ) -> AsyncGenerator[Union[PgDumpResponse, bytes], None]:
+    ) -> AsyncGenerator[PgDumpResponse | bytes, None]:
         async with self.client.stream(
             "POST",
             "pg_dump/",
