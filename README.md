@@ -34,5 +34,6 @@ Python 3.11 or later.
 ```bash
 uv sync            # create the venv and install everything
 make clean         # ruff format + ruff check --fix
+make test          # pytest
 uv build           # build the sdist and the wheel into dist/
 ```

@@ -6,5 +6,8 @@ format:
 lint:
 	uv run ruff check --fix .
 
+test:
+	uv run pytest
+
 build:
 	uv build
