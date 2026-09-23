@@ -10,6 +10,7 @@ that pipe, with the ``termios`` calls neutralised.
 import asyncio
 import os
 import sys
+from collections.abc import Iterator
 
 import pytest
 
@@ -50,8 +51,10 @@ class FakeTty:
         os.write(self.write_fd, text.encode())
 
     def close_stdin(self) -> None:
-        """Simulate an EOF on stdin (Ctrl-D, closed pipe)."""
-        os.close(self.write_fd)
+        """Simulate an EOF on stdin (Ctrl-D, closed pipe). Idempotent."""
+        if self.write_fd is not None:
+            os.close(self.write_fd)
+            self.write_fd = None
 
     def output(self) -> str:
         """Everything written to stdout so far."""
@@ -83,7 +86,7 @@ def fake_tty(monkeypatch, capsys) -> FakeTty:
 
 
 @pytest.fixture(params=["pipe", "native"])
-def terminal(request, fake_tty, monkeypatch) -> Terminal | None:
+def terminal(request, fake_tty, monkeypatch) -> Iterator[Terminal | None]:
     """
     Terminal implementation to run the bridge on.
 
@@ -92,14 +95,20 @@ def terminal(request, fake_tty, monkeypatch) -> Terminal | None:
     (there is no TTY in CI). ``native`` is skipped on Windows since the
     console API cannot be driven from a pipe.
 
-    Returns
-    -------
+    Yields
+    ------
     Terminal | None
         The instance to inject, or ``None`` to let ``WargShell`` build the
         native one.
     """
     if request.param == "pipe":
-        return PipeTerminal()
+        term = PipeTerminal()
+        yield term
+        # Give the reader thread its EOF before the pipe's read end is
+        # closed: closing a handle with a pending read hangs on Windows.
+        fake_tty.close_stdin()
+        term.join_stdin_thread(timeout=5)
+        return
 
     if sys.platform == "win32":
         pytest.skip("Windows console modes cannot be tested on a pipe")
@@ -110,7 +119,7 @@ def terminal(request, fake_tty, monkeypatch) -> Terminal | None:
     monkeypatch.setattr(termios, "tcgetattr", lambda fd: [0, 0, 0, 0, 0, 0, []])
     monkeypatch.setattr(termios, "tcsetattr", lambda fd, when, attrs: None)
     monkeypatch.setattr(tty, "setraw", lambda fd: None)
-    return None
+    yield None
 
 
 async def test_shell_session_round_trip(fake_warg, fake_tty, terminal):

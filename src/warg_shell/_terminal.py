@@ -108,6 +108,16 @@ class ThreadedStdinMixin:
             self._thread.start()
         return await self._queue.get()
 
+    def join_stdin_thread(self, timeout: float) -> None:
+        """
+        Wait for the reader thread to notice EOF and exit.
+
+        Closing stdin while the thread is blocked reading it hangs on
+        Windows, so callers must make stdin hit EOF first, then call this.
+        """
+        if self._thread is not None:
+            self._thread.join(timeout)
+
 
 class PosixTerminal(Terminal):
     """
