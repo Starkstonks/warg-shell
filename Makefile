@@ -1,7 +1,10 @@
 clean: format lint
 
 format:
-	poetry run ruff format .
+	uv run ruff format .
 
 lint:
-	poetry run ruff check --fix .
+	uv run ruff check --fix .
+
+build:
+	uv build

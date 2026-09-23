@@ -28,7 +28,7 @@ class WargShell:
                     self.loop.create_task(self.ws_to_stdout(ws)),
                     self.loop.create_task(self.handle_resize(ws)),
                 ]
-                done, pending = await asyncio.wait(
+                _, pending = await asyncio.wait(
                     tasks, return_when=asyncio.FIRST_COMPLETED
                 )
                 for task in pending:
@@ -38,7 +38,7 @@ class WargShell:
                     except asyncio.CancelledError:
                         pass
         except Exception as e:
-            print(f"Connection error: {e}")
+            sys.stderr.write(f"Connection error: {e}\n")
         finally:
             self.restore_terminal()
 
